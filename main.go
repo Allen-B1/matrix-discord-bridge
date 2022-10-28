@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/gomarkdown/markdown"
+	mhtml "github.com/gomarkdown/markdown/html"
 	"github.com/matrix-org/gomatrix"
 )
 
@@ -85,6 +88,16 @@ func getContent(config *Config, uri string) (io.Reader, error) {
 			return nil, err
 		}
 		return resp.Body, nil
+	}
+}
+
+func fileSize(bytes int) string {
+	if bytes >= 1024*1024 {
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(1024*1024))
+	} else if bytes >= 1024 {
+		return fmt.Sprintf("%.1f kB", float64(bytes)/float64(1024))
+	} else {
+		return fmt.Sprint(bytes) + " B"
 	}
 }
 
@@ -201,10 +214,18 @@ func main() {
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "error reading file: ", err)
 			}
+
+			filename := ""
+			if f, ok := ev.Content["filename"].(string); ok {
+				filename = f
+			} else {
+				filename = fmt.Sprint(ev.Content["body"])
+			}
+
 			if err == nil {
 				_, err = dg.WebhookExecute(webhookId, webhookToken, false, &discordgo.WebhookParams{
 					Files: []*discordgo.File{{
-						Name:        fmt.Sprint(ev.Content["filename"]),
+						Name:        filename,
 						ContentType: fmt.Sprint(ev.Content["info"].(map[string]interface{})["mimetype"]),
 						Reader:      reader,
 					}},
@@ -221,38 +242,70 @@ func main() {
 		}
 
 		roomID := config.Bridge[m.ChannelID]
-		if roomID != "" {
-			if m.Content != "" {
-				_, err := mg.SendFormattedText(config.Bridge[m.ChannelID], m.Author.Username+": "+m.Content, "<b>"+m.Author.Username+"</b>: "+m.Content)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "error sending to `"+config.Bridge[m.ChannelID]+"` : ", err)
-				}
-			}
-			if len(m.Message.Attachments) != 0 {
-				for _, attachment := range m.Message.Attachments {
-					upload, err := mg.UploadLink(attachment.URL)
-					if err != nil {
-						fmt.Fprintln(os.Stderr, "error uploading attachment to `"+config.Bridge[m.ChannelID]+"` : ", err)
-					}
+		if roomID == "" {
+			return
+		}
 
-					if strings.HasPrefix(attachment.ContentType, "image/") {
-						_, err = mg.SendImage(roomID, attachment.Filename, upload.ContentURI)
-						if err != nil {
-							fmt.Fprintln(os.Stderr, "error sending attachment to `"+config.Bridge[m.ChannelID]+"` : ", err)
-						}
-					} else {
-						mg.SendMessageEvent(roomID, "m.room.message", map[string]interface{}{
-							"body":     attachment.Filename,
-							"filename": attachment.Filename,
-							"msgtype":  "m.file",
-							"url":      upload.ContentURI,
-							"info": map[string]interface{}{
-								"mimetype": attachment.ContentType,
-								"size":     attachment.Size,
-							},
-						})
-					}
+		if m.Content != "" {
+			contentHTML := string(markdown.ToHTML([]byte(m.Content), nil, mhtml.NewRenderer(mhtml.RendererOptions{Flags: mhtml.CommonFlags})))
+			contentHTML = strings.TrimSpace(contentHTML)
+			if strings.HasPrefix(contentHTML, "<p>") && strings.HasSuffix(contentHTML, "</p>") {
+				contentHTML = strings.TrimPrefix(contentHTML, "<p>")
+				contentHTML = strings.TrimSuffix(contentHTML, "</p>")
+			}
+			_, err := mg.SendFormattedText(roomID,
+				m.Author.Username+": "+m.Content,
+				"<b>"+m.Author.Username+"</b>: "+contentHTML)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error sending to `"+roomID+"` : ", err)
+			}
+		}
+
+		if len(m.Message.Attachments) == 1 && m.Message.Attachments[0].Size <= 64*1024 {
+			attachment := m.Attachments[0]
+			upload, err := mg.UploadLink(attachment.URL)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error uploading attachment to `"+config.Bridge[m.ChannelID]+"` : ", err)
+			}
+
+			if strings.HasPrefix(attachment.ContentType, "image/") {
+				_, err := mg.SendMessageEvent(roomID, "m.room.message", map[string]interface{}{
+					"body":     m.Author.Username + " uploaded " + attachment.Filename,
+					"filename": attachment.Filename,
+					"msgtype":  "m.image",
+					"url":      upload.ContentURI,
+					"info": map[string]interface{}{
+						"mimetype": attachment.ContentType,
+						"size":     attachment.Size,
+					},
+				})
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "error sending attachment to `"+config.Bridge[m.ChannelID]+"` : ", err)
 				}
+			} else {
+				mg.SendMessageEvent(roomID, "m.room.message", map[string]interface{}{
+					"body":     m.Author.Username + " uploaded " + attachment.Filename,
+					"filename": attachment.Filename,
+					"msgtype":  "m.file",
+					"url":      upload.ContentURI,
+					"info": map[string]interface{}{
+						"mimetype": attachment.ContentType,
+						"size":     attachment.Size,
+					},
+				})
+			}
+		} else if len(m.Attachments) != 0 {
+			contentPlain := m.Author.Username + " uploaded files"
+			contentHTML := "<b>" + m.Author.Username + "</b> uploaded files<table><tr><th>Link</th><th>MIME Type</th><th>Size</th></tr>"
+			for _, attachment := range m.Message.Attachments {
+				contentHTML += fmt.Sprintf("<tr><td><a href=\"%s\">%s</a></td><td>%s</td><td>%s</td></tr>", attachment.URL, html.EscapeString(attachment.Filename), attachment.ContentType, fileSize(attachment.Size))
+				contentPlain += fmt.Sprintf("\n%s (%s): %s", attachment.Filename, fileSize(attachment.Size), attachment.URL)
+			}
+			contentHTML += "</table>"
+
+			_, err := mg.SendFormattedText(roomID, contentPlain, contentHTML)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error uploading file table", err)
 			}
 		}
 	})
