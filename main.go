@@ -50,7 +50,7 @@ func writeDefaultConfig(configPath string) {
 			Prefix: ":",
 		},
 		Bridge: map[string]string{
-			"1235678930234": "@room:matrix.org",
+			"1235678930234": "!roomid.Aefdy5f:matrix.org",
 		},
 	}
 
@@ -148,7 +148,8 @@ func main() {
 		panic("error connecting to discord: " + err.Error())
 	}
 
-	webhooks, err := NewWebhookManager(dg, ".webhooks")
+	os.Mkdir("bridgedata", os.ModePerm)
+	webhooks, err := NewWebhookManager(dg, "bridgedata/webhooks.json")
 	if err != nil {
 		panic("error creating webhook manager: " + err.Error())
 	}

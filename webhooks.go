@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+
+	_ "embed"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -32,12 +35,15 @@ func NewWebhookManager(dg *discordgo.Session, file string) (*WebhookManager, err
 	return &WebhookManager{dg: dg, file: file, webhooks: webhooks}, nil
 }
 
+//go:embed assets/webhook-discord.txt
+var webhookAvatarDiscord string
+
 // Get a discord webhook ID for a matrix username.
 // Creates a webhook if it does not exist.
 func (m *WebhookManager) Get(channel string, username string) (string, string, error) {
 	webhook, ok := m.webhooks[channel+" | "+username]
 	if !ok {
-		webhookObj, err := m.dg.WebhookCreate(channel, username, "")
+		webhookObj, err := m.dg.WebhookCreate(channel, username, "data:image/png;base64,"+strings.ReplaceAll(webhookAvatarDiscord, "\n", ""))
 		if err != nil {
 			return "", "", err
 		}
