@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	_ "embed"
 
@@ -20,6 +21,8 @@ type WebhookManager struct {
 	dg       *discordgo.Session
 	webhooks map[string]WebhookInfo
 	file     string
+
+	lock sync.RWMutex
 }
 
 func NewWebhookManager(dg *discordgo.Session, file string) (*WebhookManager, error) {
@@ -41,7 +44,10 @@ var webhookAvatarDiscord string
 // Get a discord webhook ID for a matrix username.
 // Creates a webhook if it does not exist.
 func (m *WebhookManager) Get(channel string, username string) (string, string, error) {
+	m.lock.RLock()
 	webhook, ok := m.webhooks[channel+" | "+username]
+	m.lock.RUnlock()
+
 	if !ok {
 		webhookObj, err := m.dg.WebhookCreate(channel, username, "data:image/png;base64,"+strings.ReplaceAll(webhookAvatarDiscord, "\n", ""))
 		if err != nil {
@@ -49,8 +55,10 @@ func (m *WebhookManager) Get(channel string, username string) (string, string, e
 		}
 
 		webhook = WebhookInfo{ID: webhookObj.ID, Token: webhookObj.Token}
+		m.lock.Lock()
 		m.webhooks[channel+" | "+username] = webhook
-		if err = m.Save(); err != nil {
+		m.lock.Unlock()
+		if err = m.save(); err != nil {
 			fmt.Fprintf(os.Stderr, "error saving webhooks: "+err.Error())
 		}
 	}
@@ -59,6 +67,8 @@ func (m *WebhookManager) Get(channel string, username string) (string, string, e
 }
 
 func (m *WebhookManager) Has(id string) bool {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
 	for _, webhook := range m.webhooks {
 		if webhook.ID == id {
 			return true
@@ -67,7 +77,7 @@ func (m *WebhookManager) Has(id string) bool {
 	return false
 }
 
-func (m *WebhookManager) Save() error {
+func (m *WebhookManager) save() error {
 	bytes, err := json.Marshal(m.webhooks)
 	if err != nil {
 		return err

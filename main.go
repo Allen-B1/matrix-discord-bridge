@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -107,6 +108,14 @@ func init() {
 	flag.StringVar(&configPath, "config", "config.json", "Path to configuration file")
 }
 
+func matrixMsgToDiscord(sender string, content map[string]interface{}) string {
+	if content["msgtype"] == "m.emote" {
+		return "* **" + stripMatrixName(sender) + "** " + fmt.Sprint(content["body"])
+	} else {
+		return fmt.Sprint(content["body"])
+	}
+}
+
 func main() {
 	flag.Parse()
 
@@ -153,6 +162,10 @@ func main() {
 	if err != nil {
 		panic("error creating webhook manager: " + err.Error())
 	}
+	messageManager, err := NewMessageManager("bridgedata/messages.json")
+	if err != nil {
+		panic("error creating message manager: " + err.Error())
+	}
 
 	// handle events
 	syncer := mg.Syncer.(*gomatrix.DefaultSyncer)
@@ -165,75 +178,97 @@ func main() {
 			return
 		}
 
-		discordId := matrixToDiscord[ev.RoomID]
-		if discordId == "" {
+		discordChannelID := matrixToDiscord[ev.RoomID]
+		if discordChannelID == "" {
 			return
 		}
 
-		webhookId, webhookToken, err := webhooks.Get(discordId, ev.Sender)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "error getting webhook: ", err)
-		}
-
-		switch fmt.Sprint(ev.Content["msgtype"]) {
-		case "m.text", "m.notice":
-			_, err = dg.WebhookExecute(webhookId, webhookToken, false, &discordgo.WebhookParams{
-				Content:  fmt.Sprint(ev.Content["body"]),
-				Username: stripMatrixName(ev.Sender)})
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "error sending webhook: ", err)
-			}
-		case "m.emote":
-			_, err = dg.ChannelMessageSend(discordId, "* **"+stripMatrixName(ev.Sender)+"** "+fmt.Sprint(ev.Content["body"]))
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "error sending emote to discord: ", err)
+		relatesTo, ok := ev.Content["m.relates_to"].(map[string]interface{})
+		if ok && relatesTo["rel_type"] == "m.replace" {
+			oldMsg := messageManager.GetMatrix(fmt.Sprint(relatesTo["event_id"]))
+			if oldMsg == nil {
+				return
 			}
 
-		case "m.image", "m.audio", "m.video":
-			mimeType := fmt.Sprint(ev.Content["info"].(map[string]interface{})["mimetype"])
-			extensions, err := mime.ExtensionsByType(mimeType)
-			extension := ""
-			if err == nil && len(extensions) != 0 {
-				extension = extensions[0]
-			}
-			reader, err := getContent(&config, fmt.Sprint(ev.Content["url"]))
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "error reading image/audio/video: ", err)
-			}
-			_, err = dg.WebhookExecute(webhookId, webhookToken, false, &discordgo.WebhookParams{
-				Files: []*discordgo.File{{
-					Name:        fmt.Sprint(ev.Content["msgtype"])[2:] + extension,
-					ContentType: mimeType,
-					Reader:      reader,
-				}},
-				Username: stripMatrixName(ev.Sender)})
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "error sending webhook: ", err)
-			}
-		case "m.file":
-			reader, err := getContent(&config, fmt.Sprint(ev.Content["url"]))
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "error reading file: ", err)
+			newContent, ok := ev.Content["m.new_content"].(map[string]interface{})
+			if !ok {
+				log.Println("replacement event without new content")
+				return
 			}
 
-			filename := ""
-			if f, ok := ev.Content["filename"].(string); ok {
-				filename = f
-			} else {
-				filename = fmt.Sprint(ev.Content["body"])
+			content := matrixMsgToDiscord(ev.Sender, newContent)
+			_, err = dg.WebhookMessageEdit(oldMsg.WebhookID, oldMsg.WebhookToken, oldMsg.DiscordID, &discordgo.WebhookEdit{Content: &content})
+			if err != nil {
+				log.Println("error editing discord message:", err)
+			}
+		} else {
+			webhookId, webhookToken, err := webhooks.Get(discordChannelID, ev.Sender)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error getting webhook: ", err)
 			}
 
-			if err == nil {
-				_, err = dg.WebhookExecute(webhookId, webhookToken, false, &discordgo.WebhookParams{
+			var discordMsg *discordgo.Message
+			switch fmt.Sprint(ev.Content["msgtype"]) {
+			case "m.text", "m.notice", "m.emote":
+				discordMsg, err = dg.WebhookExecute(webhookId, webhookToken, true, &discordgo.WebhookParams{
+					Content:  matrixMsgToDiscord(ev.Sender, ev.Content),
+					Username: stripMatrixName(ev.Sender)})
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "error sending webhook: ", err)
+				}
+			case "m.image", "m.audio", "m.video":
+				mimeType := fmt.Sprint(ev.Content["info"].(map[string]interface{})["mimetype"])
+				extensions, err := mime.ExtensionsByType(mimeType)
+				extension := ""
+				if err == nil && len(extensions) != 0 {
+					extension = extensions[0]
+				}
+				reader, err := getContent(&config, fmt.Sprint(ev.Content["url"]))
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "error reading image/audio/video: ", err)
+				}
+				discordMsg, err = dg.WebhookExecute(webhookId, webhookToken, true, &discordgo.WebhookParams{
 					Files: []*discordgo.File{{
-						Name:        filename,
-						ContentType: fmt.Sprint(ev.Content["info"].(map[string]interface{})["mimetype"]),
+						Name:        fmt.Sprint(ev.Content["msgtype"])[2:] + extension,
+						ContentType: mimeType,
 						Reader:      reader,
 					}},
 					Username: stripMatrixName(ev.Sender)})
 				if err != nil {
 					fmt.Fprintln(os.Stderr, "error sending webhook: ", err)
 				}
+			case "m.file":
+				reader, err := getContent(&config, fmt.Sprint(ev.Content["url"]))
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "error reading file: ", err)
+				}
+
+				filename := ""
+				if f, ok := ev.Content["filename"].(string); ok {
+					filename = f
+				} else {
+					filename = fmt.Sprint(ev.Content["body"])
+				}
+
+				if err == nil {
+					discordMsg, err = dg.WebhookExecute(webhookId, webhookToken, true, &discordgo.WebhookParams{
+						Files: []*discordgo.File{{
+							Name:        filename,
+							ContentType: fmt.Sprint(ev.Content["info"].(map[string]interface{})["mimetype"]),
+							Reader:      reader,
+						}},
+						Username: stripMatrixName(ev.Sender)})
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "error sending webhook: ", err)
+					}
+				}
+			}
+
+			if discordMsg != nil {
+				messageManager.Add(&MessageInfo{
+					WebhookID: webhookId, WebhookToken: webhookToken,
+					DiscordID: discordMsg.ID, MatrixID: ev.ID,
+				})
 			}
 		}
 	})
