@@ -11,9 +11,16 @@ type MessageInfo struct {
 	DiscordID    string `json:"discord_id"`
 	WebhookID    string `json:"webhook_id"`
 	WebhookToken string `json:"webhook_token"`
+	ChannelID    string `json:"channel_id"`
+	GuildID      string `json:"guild_id"`
 
 	RoomID   string `json:"room_id"`
 	MatrixID string `json:"matrix_id"`
+
+	// Discord properties
+	Content   string `json:"content"`
+	Author    string `json:"author"`
+	AvatarURL string `json:"avatar_url"`
 }
 
 type MessageManager struct {
