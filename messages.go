@@ -12,6 +12,7 @@ type MessageInfo struct {
 	WebhookID    string `json:"webhook_id"`
 	WebhookToken string `json:"webhook_token"`
 
+	RoomID   string `json:"room_id"`
 	MatrixID string `json:"matrix_id"`
 }
 

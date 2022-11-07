@@ -108,6 +108,16 @@ func init() {
 	flag.StringVar(&configPath, "config", "config.json", "Path to configuration file")
 }
 
+func discordMsgToMatrixHTML(sender string, content string) string {
+	contentHTML := string(markdown.ToHTML([]byte(content), nil, mhtml.NewRenderer(mhtml.RendererOptions{Flags: mhtml.CommonFlags})))
+	contentHTML = strings.TrimSpace(contentHTML)
+	if strings.HasPrefix(contentHTML, "<p>") && strings.HasSuffix(contentHTML, "</p>") {
+		contentHTML = strings.TrimPrefix(contentHTML, "<p>")
+		contentHTML = strings.TrimSuffix(contentHTML, "</p>")
+	}
+	return "<b>" + sender + "</b>: " + contentHTML
+}
+
 func matrixMsgToDiscord(sender string, content map[string]interface{}) string {
 	if content["msgtype"] == "m.emote" {
 		return "* **" + stripMatrixName(sender) + "** " + fmt.Sprint(content["body"])
@@ -185,8 +195,8 @@ func main() {
 
 		relatesTo, ok := ev.Content["m.relates_to"].(map[string]interface{})
 		if ok && relatesTo["rel_type"] == "m.replace" {
-			oldMsg := messageManager.GetMatrix(fmt.Sprint(relatesTo["event_id"]))
-			if oldMsg == nil {
+			messageInfo := messageManager.GetMatrix(fmt.Sprint(relatesTo["event_id"]))
+			if messageInfo == nil {
 				return
 			}
 
@@ -197,7 +207,7 @@ func main() {
 			}
 
 			content := matrixMsgToDiscord(ev.Sender, newContent)
-			_, err = dg.WebhookMessageEdit(oldMsg.WebhookID, oldMsg.WebhookToken, oldMsg.DiscordID, &discordgo.WebhookEdit{Content: &content})
+			_, err = dg.WebhookMessageEdit(messageInfo.WebhookID, messageInfo.WebhookToken, messageInfo.DiscordID, &discordgo.WebhookEdit{Content: &content})
 			if err != nil {
 				log.Println("error editing discord message:", err)
 			}
@@ -227,7 +237,7 @@ func main() {
 				if err != nil {
 					fmt.Fprintln(os.Stderr, "error reading image/audio/video: ", err)
 				}
-				discordMsg, err = dg.WebhookExecute(webhookId, webhookToken, true, &discordgo.WebhookParams{
+				_, err = dg.WebhookExecute(webhookId, webhookToken, true, &discordgo.WebhookParams{
 					Files: []*discordgo.File{{
 						Name:        fmt.Sprint(ev.Content["msgtype"])[2:] + extension,
 						ContentType: mimeType,
@@ -251,7 +261,7 @@ func main() {
 				}
 
 				if err == nil {
-					discordMsg, err = dg.WebhookExecute(webhookId, webhookToken, true, &discordgo.WebhookParams{
+					_, err = dg.WebhookExecute(webhookId, webhookToken, true, &discordgo.WebhookParams{
 						Files: []*discordgo.File{{
 							Name:        filename,
 							ContentType: fmt.Sprint(ev.Content["info"].(map[string]interface{})["mimetype"]),
@@ -267,7 +277,8 @@ func main() {
 			if discordMsg != nil {
 				messageManager.Add(&MessageInfo{
 					WebhookID: webhookId, WebhookToken: webhookToken,
-					DiscordID: discordMsg.ID, MatrixID: ev.ID,
+					DiscordID: discordMsg.ID,
+					MatrixID:  ev.ID, RoomID: ev.RoomID,
 				})
 			}
 		}
@@ -282,16 +293,11 @@ func main() {
 			return
 		}
 
+		var ev *gomatrix.RespSendEvent
 		if m.Content != "" {
-			contentHTML := string(markdown.ToHTML([]byte(m.Content), nil, mhtml.NewRenderer(mhtml.RendererOptions{Flags: mhtml.CommonFlags})))
-			contentHTML = strings.TrimSpace(contentHTML)
-			if strings.HasPrefix(contentHTML, "<p>") && strings.HasSuffix(contentHTML, "</p>") {
-				contentHTML = strings.TrimPrefix(contentHTML, "<p>")
-				contentHTML = strings.TrimSuffix(contentHTML, "</p>")
-			}
-			_, err := mg.SendFormattedText(roomID,
+			ev, err = mg.SendFormattedText(roomID,
 				m.Author.Username+": "+m.Content,
-				"<b>"+m.Author.Username+"</b>: "+contentHTML)
+				discordMsgToMatrixHTML(m.Author.Username, m.Content))
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "error sending to `"+roomID+"` : ", err)
 			}
@@ -305,7 +311,7 @@ func main() {
 			}
 
 			if strings.HasPrefix(attachment.ContentType, "image/") {
-				_, err := mg.SendMessageEvent(roomID, "m.room.message", map[string]interface{}{
+				_, err = mg.SendMessageEvent(roomID, "m.room.message", map[string]interface{}{
 					"body":     m.Author.Username + " uploaded " + attachment.Filename,
 					"filename": attachment.Filename,
 					"msgtype":  "m.image",
@@ -319,7 +325,7 @@ func main() {
 					fmt.Fprintln(os.Stderr, "error sending attachment to `"+config.Bridge[m.ChannelID]+"` : ", err)
 				}
 			} else {
-				mg.SendMessageEvent(roomID, "m.room.message", map[string]interface{}{
+				_, err = mg.SendMessageEvent(roomID, "m.room.message", map[string]interface{}{
 					"body":     m.Author.Username + " uploaded " + attachment.Filename,
 					"filename": attachment.Filename,
 					"msgtype":  "m.file",
@@ -329,6 +335,9 @@ func main() {
 						"size":     attachment.Size,
 					},
 				})
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "error sending attachment to `"+config.Bridge[m.ChannelID]+"` : ", err)
+				}
 			}
 		} else if len(m.Attachments) != 0 {
 			contentPlain := m.Author.Username + " uploaded files"
@@ -339,10 +348,37 @@ func main() {
 			}
 			contentHTML += "</table>"
 
-			_, err := mg.SendFormattedText(roomID, contentPlain, contentHTML)
+			_, err = mg.SendFormattedText(roomID, contentPlain, contentHTML)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "error uploading file table", err)
 			}
+		}
+
+		if ev != nil {
+			messageManager.Add(&MessageInfo{
+				DiscordID: m.ID,
+				WebhookID: "", WebhookToken: "",
+				MatrixID: ev.EventID, RoomID: config.Bridge[m.ChannelID],
+			})
+		}
+	})
+	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageUpdate) {
+		messageInfo := messageManager.GetDiscord(m.ID)
+		if messageInfo != nil {
+			mg.SendMessageEvent(messageInfo.RoomID, "m.room.message", map[string]interface{}{
+				"body":    "* " + m.Author.Username + ": " + m.Content,
+				"msgtype": "m.text",
+				"m.new_content": map[string]interface{}{
+					"body":           m.Author.Username + ": " + m.Content,
+					"format":         "org.matrix.custom.html",
+					"formatted_body": discordMsgToMatrixHTML(m.Author.Username, m.Content),
+					"msgtype":        "m.text",
+				},
+				"m.relates_to": map[string]interface{}{
+					"rel_type": "m.replace",
+					"event_id": messageInfo.MatrixID,
+				},
+			})
 		}
 	})
 
