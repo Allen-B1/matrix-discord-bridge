@@ -119,11 +119,20 @@ func discordMsgToMatrixHTML(sender string, content string) string {
 }
 
 func matrixMsgToDiscord(sender string, content map[string]interface{}) string {
+	body := fmt.Sprint(content["body"])
+	if relatesTo, ok := content["m.relates_to"].(map[string]interface{}); ok {
+		if _, ok := relatesTo["m.in_reply_to"].(map[string]interface{}); ok {
+			if strings.HasPrefix(body, ">") {
+				i := strings.Index(body, "\n")
+				body = strings.TrimSpace(body[i+1:])
+			}
+		}
+	}
+
 	if content["msgtype"] == "m.emote" {
-		// TODO: strip reply messages, without stripping other messages
-		return "* **" + stripMatrixName(sender) + "** " + fmt.Sprint(content["body"])
+		return "* **" + stripMatrixName(sender) + "** " + body
 	} else {
-		return fmt.Sprint(content["body"])
+		return body
 	}
 }
 
@@ -300,10 +309,14 @@ func main() {
 			}
 
 			if discordMsg != nil {
+				channel, err := dg.Channel(discordMsg.ChannelID)
+				if err != nil {
+					log.Println("error retrieving channel for reply", err)
+				}
 				messageManager.Add(&MessageInfo{
 					DiscordID: discordMsg.ID,
 					WebhookID: webhookId, WebhookToken: webhookToken,
-					ChannelID: discordChannelID, GuildID: discordMsg.GuildID,
+					ChannelID: channel.ID, GuildID: channel.GuildID,
 					MatrixID: ev.ID, RoomID: ev.RoomID,
 
 					Content:   discordMsg.Content,
